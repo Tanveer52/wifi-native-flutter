@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.wifi.ScanResult
+import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -27,11 +28,23 @@ class MainActivity : FlutterActivity() {
         wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-            if (call.method == "getAvailableWiFiNetworks") {
-                methodResult = result
-                checkAndRequestPermissions()
-            } else {
-                result.notImplemented()
+            when (call.method) {
+                "getAvailableWiFiNetworks" -> {
+                    methodResult = result
+                    checkAndRequestPermissions()
+                }
+                "connectToWiFi" -> {
+                    val ssid = call.argument<String>("ssid")
+                    val password = call.argument<String>("password")
+                    if (ssid != null && password != null) {
+                        connectToWiFi(ssid, password, result)
+                    } else {
+                        result.error("INVALID_ARGUMENT", "SSID or Password is missing", null)
+                    }
+                }
+                else -> {
+                    result.notImplemented()
+                }
             }
         }
 
@@ -89,6 +102,27 @@ class MainActivity : FlutterActivity() {
         Log.d(TAG, "Returning WiFi list with size: ${wifiList.size}")
         methodResult?.success(wifiList)
         methodResult = null
+    }
+
+    private fun connectToWiFi(ssid: String, password: String, result: MethodChannel.Result) {
+        val wifiConfig = WifiConfiguration().apply {
+            SSID = "\"$ssid\""
+            preSharedKey = "\"$password\""
+        }
+        val netId = wifiManager.addNetwork(wifiConfig)
+        if (netId == -1) {
+            result.error("CONNECTION_FAILED", "Failed to add network configuration", null)
+            return
+        }
+
+        wifiManager.disconnect()
+        val success = wifiManager.enableNetwork(netId, true)
+        if (success) {
+            wifiManager.reconnect()
+            result.success("CONNECTED")
+        } else {
+            result.error("CONNECTION_FAILED", "Failed to connect to network", null)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
