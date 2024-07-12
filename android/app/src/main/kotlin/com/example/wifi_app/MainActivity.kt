@@ -9,44 +9,40 @@ import android.content.pm.PackageManager
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.example.wifi_app/wifi"
+    private val WIFI_CHANNEL = "com.example.wifi_app/wifi"
     private val TAG = "MainActivity"
     private lateinit var wifiManager: WifiManager
     private lateinit var wifiScanReceiver: BroadcastReceiver
-    private var methodResult: MethodChannel.Result? = null
+    private var eventSink: EventChannel.EventSink? = null
+    private val scanInterval = 10000L // 10 seconds
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "getAvailableWiFiNetworks" -> {
-                    methodResult = result
-                    checkAndRequestPermissions()
-                }
-                "connectToWiFi" -> {
-                    val ssid = call.argument<String>("ssid")
-                    val password = call.argument<String>("password")
-                    if (ssid != null && password != null) {
-                        connectToWiFi(ssid, password, result)
-                    } else {
-                        result.error("INVALID_ARGUMENT", "SSID or Password is missing", null)
-                    }
-                }
-                else -> {
-                    result.notImplemented()
-                }
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, WIFI_CHANNEL).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                eventSink = events
+                checkAndRequestPermissions()
             }
-        }
+
+            override fun onCancel(arguments: Any?) {
+                eventSink = null
+                handler.removeCallbacks(scanRunnable)
+            }
+        })
 
         wifiScanReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -56,7 +52,7 @@ class MainActivity : FlutterActivity() {
                         handleScanResults()
                     } else {
                         Log.d(TAG, "Scan failed")
-                        methodResult?.error("SCAN_FAILED", "WiFi scan failed", null)
+                        eventSink?.error("SCAN_FAILED", "WiFi scan failed", null)
                     }
                 }
             }
@@ -64,12 +60,23 @@ class MainActivity : FlutterActivity() {
         registerReceiver(wifiScanReceiver, IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION))
     }
 
+    private val scanRunnable = object : Runnable {
+        override fun run() {
+            startWifiScan()
+            handler.postDelayed(this, scanInterval)
+        }
+    }
+
     private fun checkAndRequestPermissions() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1)
         } else {
-            startWifiScan()
+            startPeriodicScan()
         }
+    }
+
+    private fun startPeriodicScan() {
+        handler.post(scanRunnable)
     }
 
     private fun startWifiScan() {
@@ -77,7 +84,7 @@ class MainActivity : FlutterActivity() {
         val scanSuccess = wifiManager.startScan()
         if (!scanSuccess) {
             Log.d(TAG, "Scan initiation failed")
-            methodResult?.error("SCAN_FAILED", "WiFi scan initiation failed", null)
+            eventSink?.error("SCAN_FAILED", "WiFi scan initiation failed", null)
         }
     }
 
@@ -100,39 +107,16 @@ class MainActivity : FlutterActivity() {
             wifiList.add(wifiInfo)
         }
         Log.d(TAG, "Returning WiFi list with size: ${wifiList.size}")
-        methodResult?.success(wifiList)
-        methodResult = null
-    }
-
-    private fun connectToWiFi(ssid: String, password: String, result: MethodChannel.Result) {
-        val wifiConfig = WifiConfiguration().apply {
-            SSID = "\"$ssid\""
-            preSharedKey = "\"$password\""
-        }
-        val netId = wifiManager.addNetwork(wifiConfig)
-        if (netId == -1) {
-            result.error("CONNECTION_FAILED", "Failed to add network configuration", null)
-            return
-        }
-
-        wifiManager.disconnect()
-        val success = wifiManager.enableNetwork(netId, true)
-        if (success) {
-            wifiManager.reconnect()
-            result.success("CONNECTED")
-        } else {
-            result.error("CONNECTION_FAILED", "Failed to connect to network", null)
-        }
+        eventSink?.success(wifiList)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 1) {
             if ((grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
-                startWifiScan()
+                startPeriodicScan()
             } else {
-                methodResult?.error("PERMISSION_DENIED", "Location permission denied", null)
-                methodResult = null
+                eventSink?.error("PERMISSION_DENIED", "Location permission denied", null)
             }
         }
     }
@@ -140,5 +124,6 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(wifiScanReceiver)
+        handler.removeCallbacks(scanRunnable)
     }
 }
